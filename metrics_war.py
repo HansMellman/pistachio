@@ -1,4 +1,5 @@
 def calc_war(df):
+    df = df.copy()  # defrag the dataframe to avoid warning.
     """
     Adds WAR per position by combining fielding and hitting WAR.
     """
@@ -10,7 +11,7 @@ def calc_war(df):
     df["2B"] = df["2B_def"] + df["war_hitting"]
     df["3B"] = df["3B_def"] + df["war_hitting"]
     df["1B"] = df["1B_def"] + df["war_hitting"]
-    df["DH"] = df["DH_hitting"] 
+    df["DH"] = df["DH_hitting"]
     # identify the position with highest WAR for each player
     war_columns = ["C", "CF", "RF", "LF", "SS", "2B", "3B", "1B", "DH"]
     df["best"] = df[war_columns].max(axis=1)
@@ -27,7 +28,17 @@ def calc_war(df):
     df["DHP"] = df["DH_hittingP"]
 
     # identify the position with highest potential WAR for each player
-    war_potential_columns = ["CP", "CFP", "RFP", "LFP", "SSP", "2BP", "3BP", "1BP", "DHP"]
+    war_potential_columns = [
+        "CP",
+        "CFP",
+        "RFP",
+        "LFP",
+        "SSP",
+        "2BP",
+        "3BP",
+        "1BP",
+        "DHP",
+    ]
     df["bestP"] = df[war_potential_columns].max(axis=1)
     df["posP"] = df[war_potential_columns].idxmax(axis=1)
     return df

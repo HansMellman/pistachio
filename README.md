@@ -73,3 +73,48 @@ This is useful for tracking:
 - Feedback and pull requests welcome
 
 🧵 [OOTP Forum Post (by "Squirrel")](https://forums.ootpdevelopments.com/showthread.php?t=361580)
+
+## org_report.html (Organisation report)
+
+This project now generates an additional report: `org_report.html`. It is intended as a quick “who should I start?” view for the organisation set in `config.py`:
+
+- `team_managed` (e.g. `"KC"`) determines which org is filtered into the report. :contentReference[oaicite:7]{index=7}
+
+### What’s inside the report
+The report contains:
+
+1) **Starting lineup vs RHP** (one player per position)
+2) **Batting order vs RHP**
+3) **Starting lineup vs LHP**
+4) **Batting order vs LHP**
+5) **Rotation (Top 5 SP)**
+6) **Bullpen (Top 8 RP)**
+
+You’ll also see “summary cards” at the top showing total projected lineup WAR vs RHP/LHP and total WAR for the rotation and bullpen. :contentReference[oaicite:8]{index=8}
+
+### How lineup WAR is calculated
+Pistachio already computes positional WAR columns for hitters by combining defense + offense:
+
+- Example: `3B = 3B_def + war_hitting` (and similarly for SS/2B/CF/etc)
+- DH is special-cased: `DH = DH_hitting` (no defensive component) :contentReference[oaicite:9]{index=9}
+
+`war_hitting` comes from the player’s projected overall wOBA:
+- wOBA is computed from `wOBAR` and `wOBAL` and blended using `HANDEDNESS_WEIGHTS` (default 70% vs RHP, 30% vs LHP). 
+- Hitting WAR is then computed from wOBA using a linear conversion to runs/game and then to wins using `RUNS_PER_WIN`. 
+
+### How the org report chooses starters (and why players “move positions”)
+The org report selects a single starter at each position under two constraints:
+- A player can only be assigned to **one** starting position.
+- Premium positions are filled first (e.g. SS/CF/2B), so a versatile player may be “used up” at a premium position even if they also grade well elsewhere.
+
+### Why WAR differs vs RHP vs LHP in the org report
+Unlike `hitters.html` (which shows season-average positional WAR columns), `org_report.html` displays matchup-specific results:
+- The “vs RHP” view uses the player’s projected `wOBAR` as the offensive input.
+- The “vs LHP” view uses the player’s projected `wOBAL` as the offensive input.
+This produces different matchup-specific `pos_WAR` values for the same player across the two lineups. :contentReference[oaicite:12]{index=12}
+
+### Pitching staff selection
+Pitchers are projected via `pwOBAR`/`pwOBAL` (then blended to `pwOBA`), converted to WAR, and split into:
+- `sp_war` for starters
+- `rp_war` for relievers (scaled down due to fewer innings) 
+Rotation picks the top 5 by `sp_war`; bullpen picks the top 8 by `rp_war`.
