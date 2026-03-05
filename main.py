@@ -30,7 +30,7 @@ def main():
     df = calc_fielding_metrics(df)
     df = calc_war(df)
     df = df.sort_values(by="best", ascending=False)
-    print(df.head(10))  # Preview in terminal
+    # print(df.head(10))  # Preview in terminal
     # export_hitters(df)
     export_html_pages(df)
     export_org_report(df)

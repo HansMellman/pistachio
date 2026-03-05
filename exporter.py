@@ -269,7 +269,7 @@ def _df_to_report_table(df: pd.DataFrame, table_id: str) -> str:
             fmt[col] = _safe_format("{:.1f}".format)
         elif col in ("wOBA", "wOBA_vs", "pwOBA", "pwOBAR", "pwOBAL", "wOBAR", "wOBAL"):
             fmt[col] = _safe_format("{:.3f}".format)
-        elif col == "wRC+":
+        elif col in ("wRC+", "wRC+_vs"):
             fmt[col] = _safe_format("{:.0f}".format)
         elif col in ("BB%", "HR%", "K%"):
             fmt[col] = _pct_formatter
@@ -455,11 +455,12 @@ def export_org_report(df: pd.DataFrame, org_abbr: Optional[str] = None) -> None:
         ]
     )
 
-    # Column ordering / selection for readability
+    # roster table (note already between role and name)
     roster_cols = [
         "role",
         "note",
         "name",
+        "minor",
         "age",
         "pa",
         "wOBAR",
@@ -472,18 +473,23 @@ def export_org_report(df: pd.DataFrame, org_abbr: Optional[str] = None) -> None:
         "pos_vs_L",
         "field",
     ]
+
+    # starting lineup tables: include bat_note + split wRC+ and forced note
     lineup_cols = [
         "pos",
+        "note",
+        "bat_note",
         "name",
         "age",
-        "minor",
         "pa",
         "pos_WAR",
         "wOBA_vs",
-        "wRC+",
+        "wRC+_vs",
         "field",
     ]
-    order_cols = ["slot", "pos", "name", "wOBA_vs", "wRC+"]
+
+    # batting order tables: show split wRC+
+    order_cols = ["slot", "pos", "name", "wOBA_vs", "wRC+_vs"]
     rot_cols = ["name", "age", "minor", "ip", "sp_war", "pwOBA", "pwOBAR", "pwOBAL"]
     pen_cols = ["name", "age", "minor", "ip", "rp_war", "pwOBA", "pwOBAR", "pwOBAL"]
 

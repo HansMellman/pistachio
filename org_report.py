@@ -14,10 +14,19 @@ Key additions vs the original Pistachio exports:
     * Backup outfielder
     * 4th bat = best available (flex)
 - Optional "runs per game" estimates for each lineup, based on split wOBA and league constants.
-- Batting floor flags (The creator’s infographic concept):
-    * DH/1B/LF should generally be stronger bats (higher wRC+ floor)
-    * CF/SS/C can be weaker bats if defense is premium (lower wRC+ floor)
-  We do NOT use this to override the WAR-based selection; it is a transparency / sanity-check flag.
+- Forced assignment notes when no one is "qualified" at a defensive position (per `field` thresholds).
+- Batting floor flags (wRC+_vs) by position tier (infographic concept).
+
+IMPORTANT NOTE ABOUT "FORCED" POSITION ASSIGNMENTS
+--------------------------------------------------
+If nobody is qualified at a defensive position (no one has that position in `field`), we must still
+fill the slot. We fall back to a *sensible group* first:
+- OF positions (LF/CF/RF): fall back to any outfielder (has LF/CF/RF in field)
+- IF positions (SS/2B/3B): fall back to any infielder (has SS/2B/3B/1B in field)
+- C: fall back to any "catcher-capable" player (loose check for roster coverage)
+Only if those groups are empty do we fall back to literally anyone.
+
+This prevents nonsense like sticking a pure DH into CF when there are *any* outfielders available.
 """
 
 from __future__ import annotations
@@ -55,7 +64,7 @@ DEFAULT_POSITION_PRIORITY: List[str] = [
 # (We treat 1B & DH as "always eligible" to avoid empty lineups.)
 ELIGIBILITY_POSITIONS: Set[str] = {"C", "SS", "2B", "3B", "LF", "CF", "RF"}
 
-# Batting floors (wRC+) by position (based on the creator’s infographic tiers).
+# Batting floors (wRC+) by position (infographic tiers).
 BAT_FLOOR_WRC_PLUS: Dict[str, int] = {
     # Bat-first tier
     "DH": 115,
@@ -132,7 +141,7 @@ def _war_from_woba(woba: pd.Series) -> pd.Series:
 def _wrc_plus_from_woba(woba: object) -> object:
     """
     Compute a wRC+-style value from wOBA using the project’s league constants.
-    This is an approximation for splits (since we only have overall league constants).
+    Useful for split display (approximation since we use overall league constants).
     """
     try:
         if woba is None or (isinstance(woba, float) and pd.isna(woba)):
@@ -160,7 +169,10 @@ def _bat_floor_note(pos: str, wrc_vs: object) -> str:
 
 
 def _build_side_columns(df: pd.DataFrame, side: str) -> pd.DataFrame:
-    """Add side-specific columns needed for lineup selection + batting order."""
+    """
+    Add side-specific columns needed for lineup selection + batting order.
+    side: 'R' (vs RHP) or 'L' (vs LHP)
+    """
     if side not in ("R", "L"):
         raise ValueError("side must be 'R' or 'L'")
 
@@ -170,6 +182,7 @@ def _build_side_columns(df: pd.DataFrame, side: str) -> pd.DataFrame:
     k_col = "k_pctR" if side == "R" else "k_pctL"
 
     out = df.copy()
+
     out[f"wOBA_vs_{side}"] = out.get(woba_col)
     out[f"BBpct_vs_{side}"] = out.get(bb_col)
     out[f"HRpct_vs_{side}"] = out.get(hr_col)
@@ -180,12 +193,14 @@ def _build_side_columns(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out[f"wOBA_vs_{side}"] * (1 - DH_PENALTY)
     )
 
+    # Position scores for this side.
     for pos in ["C", "SS", "2B", "3B", "LF", "CF", "RF", "1B"]:
         out[f"{pos}_score_vs_{side}"] = (
             out.get(f"{pos}_def", 0) + out[f"war_hitting_vs_{side}"]
         )
     out[f"DH_score_vs_{side}"] = out[f"DH_hitting_vs_{side}"]
 
+    # Convenience: best score vs this side (for ranking bench candidates).
     score_cols = [
         f"{p}_score_vs_{side}" for p in ["C", "SS", "2B", "3B", "LF", "CF", "RF", "1B"]
     ] + [f"DH_score_vs_{side}"]
@@ -193,6 +208,56 @@ def _build_side_columns(df: pd.DataFrame, side: str) -> pd.DataFrame:
     out[f"best_score_vs_{side}"] = out[existing].max(axis=1) if existing else pd.NA
 
     return out
+
+
+def _is_catcher_capable(row: pd.Series) -> bool:
+    """
+    Catcher-capable coverage check:
+    - If `field` contains C, treat as catcher-capable.
+    - Otherwise, if catcher ratings exist and pass a low floor (emergency catcher), treat as capable.
+    This is intentionally looser than POSITION_THRESHOLDS, because it's a roster-coverage concept.
+    """
+    if "C" in _field_set(row.get("field", "")):
+        return True
+    for c in CATCH_RATING_COLS:
+        v = row.get(c)
+        if v is not None and pd.notna(v):
+            try:
+                if float(v) >= MIN_CATCH_RATING_FLOOR:
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def _fallback_group_candidates(candidates: pd.DataFrame, pos: str) -> pd.DataFrame:
+    """
+    When no one is qualified at `pos`, fall back to a sensible group before using literally anyone.
+    """
+    if candidates is None or candidates.empty:
+        return candidates
+
+    if pos in {"LF", "CF", "RF"}:
+        tmp = candidates[
+            candidates.apply(
+                lambda r: len(_field_set(r.get("field", "")) & OF_POS) > 0, axis=1
+            )
+        ]
+        return tmp if not tmp.empty else candidates
+
+    if pos in {"SS", "2B", "3B"}:
+        tmp = candidates[
+            candidates.apply(
+                lambda r: len(_field_set(r.get("field", "")) & INFIELD_POS) > 0, axis=1
+            )
+        ]
+        return tmp if not tmp.empty else candidates
+
+    if pos == "C":
+        tmp = candidates[candidates.apply(_is_catcher_capable, axis=1)]
+        return tmp if not tmp.empty else candidates
+
+    return candidates
 
 
 def build_starting_lineup(
@@ -234,7 +299,10 @@ def build_starting_lineup(
         )
         forced_note = f"FORCED (no qualified {pos})" if forced else ""
 
-        candidates2 = eligible if not eligible.empty else candidates
+        if not eligible.empty:
+            candidates2 = eligible
+        else:
+            candidates2 = _fallback_group_candidates(candidates, pos)
 
         if candidates2.empty or score_col not in candidates2.columns:
             lineup_rows.append(
@@ -250,6 +318,8 @@ def build_starting_lineup(
                     "wRC+_vs": pd.NA,
                     "wOBA": pd.NA,
                     "wRC+": pd.NA,
+                    "BB%": pd.NA,
+                    "HR%": pd.NA,
                     "pos_WAR": pd.NA,
                     "field": "",
                     "player_id": pd.NA,
@@ -278,6 +348,8 @@ def build_starting_lineup(
                 "wRC+_vs": wrc_vs,
                 "wOBA": pick.get("wOBA", pd.NA),
                 "wRC+": pick.get("wRC+", pd.NA),
+                "BB%": pick.get(f"BBpct_vs_{side}", pd.NA),
+                "HR%": pick.get(f"HRpct_vs_{side}", pd.NA),
                 "pos_WAR": pick.get(score_col, pd.NA),
                 "field": pick.get("field", ""),
                 "player_id": pick.get("player_id", pd.NA),
@@ -286,7 +358,18 @@ def build_starting_lineup(
 
     lineup = pd.DataFrame(lineup_rows)
 
-    for c in ["age", "minor", "pa", "wOBA_vs", "wOBA", "wRC+", "wRC+_vs", "pos_WAR"]:
+    for c in [
+        "age",
+        "minor",
+        "pa",
+        "wOBA_vs",
+        "wOBA",
+        "wRC+",
+        "wRC+_vs",
+        "BB%",
+        "HR%",
+        "pos_WAR",
+    ]:
         if c in lineup.columns:
             lineup[c] = pd.to_numeric(lineup[c], errors="coerce")
 
@@ -309,7 +392,6 @@ def build_batting_order(lineup: pd.DataFrame, side: str = "R") -> pd.DataFrame:
     """
     hitters = lineup.copy()
     hitters = hitters[hitters["name"].astype(str).str.len() > 0].copy()
-
     if hitters.empty:
         return pd.DataFrame(columns=["slot", "pos", "name", "wOBA_vs", "wRC+_vs"])
 
@@ -399,18 +481,16 @@ def build_pitching_staff(
     pool = df[df["org"] == org].copy()
 
     rotation = pool[pool.get("sprp", "").isin(["sp"])].copy()
-    rotation = (
-        rotation.sort_values("sp_war", ascending=False).head(n_sp)
-        if "sp_war" in rotation.columns
-        else rotation.head(0)
-    )
+    if not rotation.empty and "sp_war" in rotation.columns:
+        rotation = rotation.sort_values("sp_war", ascending=False).head(n_sp)
+    else:
+        rotation = rotation.head(0)
 
     bullpen = pool[pool.get("sprp", "").isin(["rp"])].copy()
-    bullpen = (
-        bullpen.sort_values("rp_war", ascending=False).head(n_rp)
-        if "rp_war" in bullpen.columns
-        else bullpen.head(0)
-    )
+    if not bullpen.empty and "rp_war" in bullpen.columns:
+        bullpen = bullpen.sort_values("rp_war", ascending=False).head(n_rp)
+    else:
+        bullpen = bullpen.head(0)
 
     rot_cols = ["name", "age", "minor", "ip", "sp_war", "pwOBA", "pwOBAR", "pwOBAL"]
     pen_cols = ["name", "age", "minor", "ip", "rp_war", "pwOBA", "pwOBAR", "pwOBAL"]
@@ -448,21 +528,6 @@ def _lineup_total_war(lineup: pd.DataFrame) -> float:
     if lineup is None or lineup.empty or "pos_WAR" not in lineup.columns:
         return 0.0
     return float(pd.to_numeric(lineup["pos_WAR"], errors="coerce").fillna(0).sum())
-
-
-def _is_catcher_capable(row: pd.Series) -> bool:
-    """Loose catcher coverage check (different from 'field' quality thresholds)."""
-    if "C" in _field_set(row.get("field", "")):
-        return True
-    for c in CATCH_RATING_COLS:
-        v = row.get(c)
-        if v is not None and pd.notna(v):
-            try:
-                if float(v) >= MIN_CATCH_RATING_FLOOR:
-                    return True
-            except Exception:
-                continue
-    return False
 
 
 def _is_backup_c(row: pd.Series) -> bool:
@@ -522,19 +587,20 @@ def build_roster_constrained_plan(
     if pool.empty:
         empty = pd.DataFrame()
         return OrgReportPlan(
-            org,
-            max_batters,
-            empty,
-            empty,
-            empty,
-            empty,
-            empty,
-            0.0,
-            0.0,
-            float("nan"),
-            float("nan"),
+            org=org,
+            max_batters=max_batters,
+            roster=empty,
+            lineup_r=empty,
+            lineup_l=empty,
+            order_r=empty,
+            order_l=empty,
+            lineup_war_r=0.0,
+            lineup_war_l=0.0,
+            runs_pg_r=float("nan"),
+            runs_pg_l=float("nan"),
         )
 
+    # Core lineup vs RHP (no roster restriction).
     lineup_r = build_starting_lineup(
         df,
         org_abbr=org,
@@ -553,6 +619,7 @@ def build_roster_constrained_plan(
     roster_ids: Set[int] = set(core_ids)
     role_map: Dict[int, str] = {pid: "Core (vs RHP)" for pid in core_ids}
 
+    # Baseline vs LHP with just the core roster.
     lineup_l_base = build_starting_lineup(
         df,
         org_abbr=org,
@@ -563,6 +630,7 @@ def build_roster_constrained_plan(
     )
     best_total = _lineup_total_war(lineup_l_base)
 
+    # Quick lookup for catcher-capable evaluation by player_id
     pool_by_id = pool.dropna(subset=["player_id"]).copy()
     pool_by_id["player_id"] = pd.to_numeric(pool_by_id["player_id"], errors="coerce")
     pool_by_id = pool_by_id.dropna(subset=["player_id"]).copy()
@@ -582,10 +650,10 @@ def build_roster_constrained_plan(
 
     need_backup_c_pick = catcher_capable_count(roster_ids) < 2
 
-    bench_slots: List[Tuple[str, Optional[callable]]]
+    # Bench slots
     if bench_profile == "standard":
         if need_backup_c_pick:
-            bench_slots = [
+            bench_slots: List[Tuple[str, Optional[callable]]] = [
                 ("Bench: Backup C", _is_backup_c),
                 ("Bench: Utility IF", _is_utility_inf),
                 ("Bench: Backup OF", _is_backup_of),
@@ -601,6 +669,7 @@ def build_roster_constrained_plan(
     else:
         bench_slots = [("Bench: Flex", None)] * max(0, max_batters - len(roster_ids))
 
+    # Prepare a side-L scored pool for quick ranking.
     pool_l = _build_side_columns(pool, side="L")
     if "best_score_vs_L" not in pool_l.columns:
         pool_l["best_score_vs_L"] = pd.NA
@@ -648,9 +717,9 @@ def build_roster_constrained_plan(
             total = _lineup_total_war(test_lineup_l)
             impr = total - best_total
 
-            cand_score = float(
-                pd.to_numeric(cand.get("best_score_vs_L"), errors="coerce") or 0.0
-            )
+            cand_score_raw = pd.to_numeric(cand.get("best_score_vs_L"), errors="coerce")
+            cand_score = 0.0 if pd.isna(cand_score_raw) else float(cand_score_raw)
+
             vers = int(cand.get("vers") or 0)
 
             if (impr > best_impr) or (
@@ -677,6 +746,7 @@ def build_roster_constrained_plan(
         )
         return best_pid, note
 
+    # Fill bench slots up to max_batters
     for label, pred in bench_slots:
         if len(roster_ids) >= max_batters:
             break
@@ -685,6 +755,7 @@ def build_roster_constrained_plan(
             continue
         role_map[pid] = label + note
 
+    # If we still have room, fill with best flex bats.
     while len(roster_ids) < max_batters:
         remaining = pool_l[~pool_l["player_id"].isin(roster_ids)].copy()
         if remaining.empty:
@@ -697,6 +768,7 @@ def build_roster_constrained_plan(
         roster_ids.add(pid)
         role_map[pid] = "Bench: Flex"
 
+    # Final vs LHP lineup restricted to roster.
     lineup_l = build_starting_lineup(
         df,
         org_abbr=org,
@@ -706,15 +778,19 @@ def build_roster_constrained_plan(
         drop_player_id=False,
     )
 
+    # Orders
     order_r = build_batting_order(lineup_r, side="R")
     order_l = build_batting_order(lineup_l, side="L")
 
+    # Runs/game estimates
     runs_pg_r = estimate_runs_per_game(order_r)
     runs_pg_l = estimate_runs_per_game(order_l)
 
+    # Totals
     lineup_war_r = _lineup_total_war(lineup_r)
     lineup_war_l = _lineup_total_war(lineup_l)
 
+    # Optionally annotate an existing roster player as "Backup C coverage" (when we didn't need a bench pick)
     if not need_backup_c_pick:
         catcher_pids = [pid for pid in roster_ids if catcher_capable_pid(pid)]
         starter_c_pid: Optional[int] = None
@@ -754,6 +830,7 @@ def build_roster_constrained_plan(
     _ingest_forced(lineup_r, "RHP")
     _ingest_forced(lineup_l, "LHP")
 
+    # Roster table
     roster = pool[pool["player_id"].isin(roster_ids)].copy()
     roster["role"] = roster["player_id"].apply(
         lambda x: role_map.get(int(x), "Bench") if pd.notna(x) else "Bench"
@@ -762,6 +839,7 @@ def build_roster_constrained_plan(
         lambda x: "; ".join(forced_notes.get(int(x), [])) if pd.notna(x) else ""
     )
 
+    # Starting flags + positions
     start_r = {
         int(pid): pos
         for pid, pos in zip(
@@ -792,10 +870,12 @@ def build_roster_constrained_plan(
     roster["pos_vs_R"] = roster["player_id"].apply(lambda x: start_r.get(int(x), ""))
     roster["pos_vs_L"] = roster["player_id"].apply(lambda x: start_l.get(int(x), ""))
 
+    # NOTE: 'note' inserted between role and name
     roster_cols = [
         "role",
         "note",
         "name",
+        "minor",
         "age",
         "pa",
         "wOBAR",
@@ -810,6 +890,7 @@ def build_roster_constrained_plan(
     ]
     roster = roster[[c for c in roster_cols if c in roster.columns]].copy()
 
+    # Sort roster: core first, then bench types
     def _role_rank(r: str) -> int:
         if r.startswith("Core"):
             return 0
