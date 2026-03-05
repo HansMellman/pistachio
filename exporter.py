@@ -1,4 +1,7 @@
+from typing import Optional
+
 import pandas as pd
+
 from config import COLUMNS_TO_BLANK_BEFORE_EXPORT, export_filepath
 
 
@@ -28,7 +31,7 @@ def export_advanced_html(
 
         return wrapped
 
-    # Apply baseball‑style formatting
+    # Apply baseball-style formatting
     fmt = {}
     for col in working_df.columns:
         if col in (
@@ -402,28 +405,23 @@ $(document).ready(function(){{
 """
 
 
-def export_org_report(df: pd.DataFrame, org_abbr: str | None = None) -> None:
+def export_org_report(df: pd.DataFrame, org_abbr: Optional[str] = None) -> None:
     """
     Build and export a single-page org report with:
-      - Starting lineup vs RHP and vs LHP (one-player-per-position)
-      - Batting order vs RHP and vs LHP
+      - A 13-batter (default) roster-aware platoon plan:
+          * Core lineup vs RHP (core 9)
+          * Best lineup vs LHP restricted to a max-batters roster cap
+          * Bench roles (backup C, utility IF, backup OF, flex)
+      - Batting orders vs RHP and vs LHP
+      - Runs/game estimates for each lineup
       - 5-man rotation and 8-man bullpen
     """
     from config import team_managed
-    from org_report import (
-        build_batting_order,
-        build_pitching_staff,
-        build_starting_lineup,
-    )
+    from org_report import build_pitching_staff, build_roster_constrained_plan
 
     org = org_abbr or team_managed
 
-    lineup_r = build_starting_lineup(df, org_abbr=org, side="R")
-    lineup_l = build_starting_lineup(df, org_abbr=org, side="L")
-
-    order_r = build_batting_order(lineup_r, side="R")
-    order_l = build_batting_order(lineup_l, side="L")
-
+    plan = build_roster_constrained_plan(df, org_abbr=org, max_batters=13)
     rotation, bullpen = build_pitching_staff(df, org_abbr=org, n_sp=5, n_rp=8)
 
     # Summaries
@@ -433,22 +431,47 @@ def export_org_report(df: pd.DataFrame, org_abbr: str | None = None) -> None:
         except Exception:
             return 0.0
 
-    sum_lineup_r = _sum_numeric(lineup_r.get("pos_WAR"))
-    sum_lineup_l = _sum_numeric(lineup_l.get("pos_WAR"))
+    sum_lineup_r = float(plan.lineup_war_r or 0.0)
+    sum_lineup_l = float(plan.lineup_war_l or 0.0)
     sum_rot = _sum_numeric(rotation.get("sp_war"))
     sum_pen = _sum_numeric(bullpen.get("rp_war"))
 
+    runs_r = plan.runs_pg_r
+    runs_l = plan.runs_pg_l
+
+    roster_count = int(len(plan.roster)) if plan.roster is not None else 0
+
+    # ✅ FIXED: use "\n".join(...) on ONE line (no broken string literal)
     summary_cards = "\n".join(
         [
             f'<div class="card"><div class="k">Org</div><div class="v">{org}</div></div>',
+            f'<div class="card"><div class="k">Active Batters Used</div><div class="v">{roster_count} / {plan.max_batters}</div></div>',
             f'<div class="card"><div class="k">Lineup WAR (vs RHP)</div><div class="v">{sum_lineup_r:.1f}</div></div>',
             f'<div class="card"><div class="k">Lineup WAR (vs LHP)</div><div class="v">{sum_lineup_l:.1f}</div></div>',
+            f'<div class="card"><div class="k">Runs / Game (vs RHP)</div><div class="v">{runs_r:.2f}</div></div>',
+            f'<div class="card"><div class="k">Runs / Game (vs LHP)</div><div class="v">{runs_l:.2f}</div></div>',
             f'<div class="card"><div class="k">Rotation WAR (Top 5)</div><div class="v">{sum_rot:.1f}</div></div>',
             f'<div class="card"><div class="k">Bullpen WAR (Top 8)</div><div class="v">{sum_pen:.1f}</div></div>',
         ]
     )
 
     # Column ordering / selection for readability
+    roster_cols = [
+        "role",
+        "note",
+        "name",
+        "age",
+        "pa",
+        "wOBAR",
+        "wOBAL",
+        "wOBA",
+        "wRC+",
+        "starts_vs_R",
+        "pos_vs_R",
+        "starts_vs_L",
+        "pos_vs_L",
+        "field",
+    ]
     lineup_cols = [
         "pos",
         "name",
@@ -464,14 +487,40 @@ def export_org_report(df: pd.DataFrame, org_abbr: str | None = None) -> None:
     rot_cols = ["name", "age", "minor", "ip", "sp_war", "pwOBA", "pwOBAR", "pwOBAL"]
     pen_cols = ["name", "age", "minor", "ip", "rp_war", "pwOBA", "pwOBAR", "pwOBAL"]
 
-    lineup_r_disp = lineup_r[[c for c in lineup_cols if c in lineup_r.columns]]
-    lineup_l_disp = lineup_l[[c for c in lineup_cols if c in lineup_l.columns]]
-    order_r_disp = order_r[[c for c in order_cols if c in order_r.columns]]
-    order_l_disp = order_l[[c for c in order_cols if c in order_l.columns]]
+    roster_disp = (
+        plan.roster[[c for c in roster_cols if c in plan.roster.columns]]
+        if plan.roster is not None
+        else pd.DataFrame()
+    )
+    lineup_r_disp = (
+        plan.lineup_r[[c for c in lineup_cols if c in plan.lineup_r.columns]]
+        if plan.lineup_r is not None
+        else pd.DataFrame()
+    )
+    lineup_l_disp = (
+        plan.lineup_l[[c for c in lineup_cols if c in plan.lineup_l.columns]]
+        if plan.lineup_l is not None
+        else pd.DataFrame()
+    )
+    order_r_disp = (
+        plan.order_r[[c for c in order_cols if c in plan.order_r.columns]]
+        if plan.order_r is not None
+        else pd.DataFrame()
+    )
+    order_l_disp = (
+        plan.order_l[[c for c in order_cols if c in plan.order_l.columns]]
+        if plan.order_l is not None
+        else pd.DataFrame()
+    )
     rotation_disp = rotation[[c for c in rot_cols if c in rotation.columns]]
     bullpen_disp = bullpen[[c for c in pen_cols if c in bullpen.columns]]
 
     sections_html = []
+    sections_html.append(
+        '<div class="section"><h2>Active roster batters (cap-aware)</h2>'
+        + _df_to_report_table(roster_disp, "roster_batters")
+        + "</div>"
+    )
     sections_html.append(
         '<div class="section"><h2>Starting lineup (vs RHP)</h2>'
         + _df_to_report_table(lineup_r_disp, "lineup_r")
@@ -505,8 +554,9 @@ def export_org_report(df: pd.DataFrame, org_abbr: str | None = None) -> None:
 
     full = HTML_ORG_REPORT_TEMPLATE.format(
         title=f"{org} Org Report",
-        subtitle="Generated by Pistachio (projected lineup + staff + batting orders).",
+        subtitle="Generated by Pistachio (cap-aware platoon roster + projected lineup + staff).",
         summary_cards=summary_cards,
+        # ✅ FIXED: join sections with "\n" on ONE line
         sections="\n".join(sections_html),
     )
 

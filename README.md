@@ -118,3 +118,29 @@ Pitchers are projected via `pwOBAR`/`pwOBAL` (then blended to `pwOBA`), converte
 - `sp_war` for starters
 - `rp_war` for relievers (scaled down due to fewer innings) 
 Rotation picks the top 5 by `sp_war`; bullpen picks the top 8 by `rp_war`.
+
+### org_report.html (cap-aware platoon roster)
+
+This project generates `org_report.html`, which proposes:
+- A “core” starting lineup vs RHP (you face more RHP overall)
+- A capped active-batter roster (default 13 unique batters total)
+- A best-possible starting lineup vs LHP restricted to that same 13-batter roster
+- Recommended batting orders vs RHP and vs LHP (The Book-style top-heavy approach)
+- A simple estimated Runs/Game for each lineup (for comparison)
+- Top 5 SP rotation and top 8 RP bullpen by projected WAR
+
+**13-batter cap logic**
+- First, Pistachio selects the best vs RHP starting lineup (“core 9”).
+- Then up to 4 additional bench bats are selected to improve the vs LHP lineup while keeping a realistic bench mix:
+  - Backup catcher
+  - Utility infielder
+  - Backup outfielder
+  - Flex bat (best remaining upgrade)
+- The vs LHP starting lineup is then built ONLY from those 13 rostered batters, so the union of players across both lineups never exceeds 13.
+
+**Runs/Game estimate**
+For each batting order, we estimate Runs/Game by:
+1) Converting each hitter’s split wOBA (wOBAR or wOBAL) into Runs/PA using league constants:
+   R/PA = ((wOBA - lg_wOBA) / wOBA_scale) + lg_R/PA
+2) Weighting each lineup slot by typical PA/G for that slot (1 gets more PA than 9)
+3) Summing across slots to produce an estimated Runs/Game for the lineup
